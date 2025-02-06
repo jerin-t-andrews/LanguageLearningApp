@@ -4,41 +4,53 @@ import AVFoundation
 struct ContentView: View {
     @State private var audioLevels: [CGFloat] = Array(repeating: 0.1, count: 20)
     @State private var isListening = false
-    @ObservedObject private var audioManager = AudioManager()
+    @StateObject private var audioManager = AudioManager()
     
     var body: some View {
         ZStack {
-            Color(hex: "FAF3D1")
+            Color(red: 250/255, green: 243/255, blue: 209/255)
                 .edgesIgnoringSafeArea(.all)
             
             VStack {
                 Spacer()
                 
-                AudioWaveView(audioLevels: audioLevels)
+                AudioWaveView(audioLevels: audioManager.levels)
                     .frame(height: 100)
-                    .padding(.horizontal, 75) // Moves waveform away from edges
-                    .onReceive(audioManager.$levels) { levels in
-                        self.audioLevels = levels
-                    }
+                    .padding(.horizontal, 75)
                 
                 Spacer()
                 
-                Button(action: {
-                    if isListening {
-                        audioManager.stopListening()
-                    } else {
-                        audioManager.startListening()
+                HStack(spacing: 20) {
+                    Button(action: {
+                        if isListening {
+                            audioManager.stopRecording()
+                        } else {
+                            audioManager.startRecording()
+                        }
+                        isListening.toggle()
+                    }) {
+                        Image(systemName: isListening ? "mic.fill" : "mic.slash.fill")
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 70, height: 70)
+                            .padding()
+                            .background(Color.black)
+                            .foregroundColor(.white)
+                            .clipShape(Circle())
                     }
-                    isListening.toggle()
-                }) {
-                    Image(systemName: isListening ? "mic.fill" : "mic.slash.fill")
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: 70, height: 70)
-                        .padding()
-                        .background(Color.black)
-                        .foregroundColor(.white)
-                        .clipShape(Circle())
+                    
+                    Button(action: {
+                        audioManager.playRecording()
+                    }) {
+                        Image(systemName: "play.fill")
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 70, height: 70)
+                            .padding()
+                            .background(Color.black)
+                            .foregroundColor(.white)
+                            .clipShape(Circle())
+                    }
                 }
                 .padding(.bottom, 50)
             }
@@ -55,8 +67,8 @@ struct AudioWaveView: View {
                 ForEach(audioLevels.indices, id: \ .self) { index in
                     RoundedRectangle(cornerRadius: 3)
                         .fill(Color.black)
-                        .frame(width: 8, height: geometry.size.height * (0.2 + audioLevels[index] * 1.2)) // More exaggerated wave
-                        .animation(Animation.easeInOut(duration: 0.1).repeatForever(autoreverses: true), value: audioLevels[index])
+                        .frame(width: 8, height: geometry.size.height * (0.2 + audioLevels[index] * 1.2))
+                        .animation(Animation.easeInOut(duration: 0.1), value: audioLevels[index])
                 }
             }
             .frame(height: geometry.size.height)
@@ -67,56 +79,113 @@ struct AudioWaveView: View {
 class AudioManager: ObservableObject {
     @Published var levels: [CGFloat] = Array(repeating: 0.1, count: 20)
     private var audioRecorder: AVAudioRecorder?
+    private var audioPlayer: AVAudioPlayer?
     private var timer: Timer?
+    private let fileName = "recording.m4a"
     
-    func startListening() {
+    func startRecording() {
         let audioSession = AVAudioSession.sharedInstance()
         try? audioSession.setCategory(.playAndRecord, mode: .default, options: .defaultToSpeaker)
         try? audioSession.setActive(true, options: .notifyOthersOnDeactivation)
         
         let settings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatAppleLossless,
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
             AVSampleRateKey: 44100.0,
             AVNumberOfChannelsKey: 1,
             AVEncoderAudioQualityKey: AVAudioQuality.max.rawValue
         ]
         
-        let url = URL(fileURLWithPath: "/dev/null")
-        audioRecorder = try? AVAudioRecorder(url: url, settings: settings)
-        audioRecorder?.isMeteringEnabled = true
-        audioRecorder?.record()
+        let url = getFileURL()
+        print("Recording will be saved at: \(url.path)")
+        
+        do {
+            audioRecorder = try AVAudioRecorder(url: url, settings: settings)
+            audioRecorder?.isMeteringEnabled = true
+            audioRecorder?.record()
+        } catch {
+            print("Failed to start recording: \(error.localizedDescription)")
+        }
         
         timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
             self.audioRecorder?.updateMeters()
-            self.levels = (0..<20).map { _ in pow(10, CGFloat(self.audioRecorder?.averagePower(forChannel: 0) ?? -60) / 20) } // Exponential scaling for dynamic waves
+            DispatchQueue.main.async {
+                self.levels = (0..<20).map { _ in
+                    let power = self.audioRecorder?.averagePower(forChannel: 0) ?? -60
+                    return CGFloat(max(0.1, min(1.0, (Double(power) + 60) / 60)))
+                }
+            }
         }
     }
     
-    func stopListening() {
+    func stopRecording() {
         audioRecorder?.stop()
         timer?.invalidate()
         levels = Array(repeating: 0.1, count: 20)
+        print("Recording stopped. File saved at: \(getFileURL().path)")
     }
-}
-
-extension Color {
-    init(hex: String) {
-        let scanner = Scanner(string: hex)
-        var hexNumber: UInt64 = 0
+    
+    func playRecording() {
+        sendRecordingToServer()
+        let url = getFileURL()
+        if !FileManager.default.fileExists(atPath: url.path) {
+            print("Audio file does not exist at path: \(url.path)")
+            return
+        }
         
-        if scanner.scanHexInt64(&hexNumber) {
-            let r = Double((hexNumber & 0xFF0000) >> 16) / 255.0
-            let g = Double((hexNumber & 0x00FF00) >> 8) / 255.0
-            let b = Double(hexNumber & 0x0000FF) / 255.0
-            self.init(red: r, green: g, blue: b)
-        } else {
-            self.init(white: 0.0)
+        do {
+            audioPlayer = try AVAudioPlayer(contentsOf: url)
+            audioPlayer?.play()
+            print("Playing audio from: \(url.path)")
+        } catch {
+            print("Failed to play recording: \(error.localizedDescription)")
         }
     }
-}
+    
+    private func sendRecordingToServer() {
+        let url = URL(string: "TEMPORARYURL")! // HERE IS WHERE THE URL GOES
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        
+        let boundary = "Boundary-\(UUID().uuidString)"
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        
+        let fileURL = getFileURL()
+        guard let audioData = try? Data(contentsOf: fileURL) else {
+            print("Failed to load recording data")
+            return
+        }
+        
+        var body = Data()
+        let filename = "recording.m4a"
+        let mimetype = "audio/m4a"
+        
+        body.append("--\(boundary)
+".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"file\"; filename=\"\(filename)\"
+".data(using: .utf8)!)
+        body.append("Content-Type: \(mimetype)
 
-struct ContentView_Previews: PreviewProvider {
-    static var previews: some View {
-        ContentView()
+".data(using: .utf8)!)
+        body.append(audioData)
+        body.append("
+".data(using: .utf8)!)
+        body.append("--\(boundary)--
+".data(using: .utf8)!)
+        
+        request.httpBody = body
+        
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            if let error = error {
+                print("Upload error: \(error.localizedDescription)")
+            } else {
+                print("Audio uploaded successfully")
+            }
+        }.resume()
+    }
+    
+    private func getFileURL() {
+        let paths = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)
+        let fileURL = paths[0].appendingPathComponent(fileName)
+        return fileURL
     }
 }
