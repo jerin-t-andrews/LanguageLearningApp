@@ -2,7 +2,6 @@ import SwiftUI
 import AVFoundation
 
 // MARK: - Model for Decoding JSON Response
-
 struct TranscriptionResponse: Codable {
     let transcription: String
     let response_text: String
@@ -10,7 +9,6 @@ struct TranscriptionResponse: Codable {
 }
 
 // MARK: - ContentView
-
 struct ContentView: View {
     @State private var isListening = false
     @StateObject private var audioManager = AudioManager()
@@ -23,9 +21,9 @@ struct ContentView: View {
             VStack {
                 Spacer()
                 
-                AudioWaveView(audioLevels: audioManager.levels)
-                    .frame(height: 100)
-                    .padding(.horizontal, 75)
+                // The bubble is always visible; if loading, a white loading circle overlays it.
+                AudioBubbleView(audioLevels: audioManager.levels, isLoading: audioManager.isLoading)
+                    .frame(width: 120, height: 120)
                 
                 Spacer()
                 
@@ -49,20 +47,26 @@ struct ContentView: View {
                             .clipShape(Circle())
                     }
                     
-                    // Play Button triggers sending the recording to the server
-                    // and then plays the returned audio (.wav file).
                     Button(action: {
                         audioManager.sendRecordingToServer()
                     }) {
-                        Image(systemName: "play.fill")
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: 70, height: 70)
-                            .padding()
-                            .background(Color.black)
-                            .foregroundColor(.white)
-                            .clipShape(Circle())
+                        ZStack {
+                            // The black circular background.
+                            Circle()
+                                .fill(Color.black)
+                            // The white play icon, offset as needed.
+                            Image(systemName: "play.fill")
+                                .resizable()
+                                .scaledToFit()
+                                .foregroundColor(.white)
+                                // Adjust the size of the icon so it fits well inside the button.
+                                .frame(width: 60, height: 60)
+                                .offset(x: 6, y: 1) // Tweak these values to nudge the icon.
+                        }
+                        .frame(width: 100, height: 100) // Maintains the overall button size.
                     }
+
+
                 }
                 .padding(.bottom, 50)
             }
@@ -70,37 +74,63 @@ struct ContentView: View {
     }
 }
 
-// MARK: - AudioWaveView
-
-struct AudioWaveView: View {
+// MARK: - AudioBubbleView
+struct AudioBubbleView: View {
     var audioLevels: [CGFloat]
+    var isLoading: Bool
+    
+    // Compute an aggregate value based on the maximum audio level.
+    private var scaleFactor: CGFloat {
+        let level = audioLevels.max() ?? 0.1
+        return 1.0 + (level - 0.1)
+    }
     
     var body: some View {
-        GeometryReader { geometry in
-            HStack(spacing: 5) {
-                ForEach(audioLevels.indices, id: \.self) { index in
-                    RoundedRectangle(cornerRadius: 3)
-                        .fill(Color.black)
-                        .frame(width: 8, height: geometry.size.height * (0.2 + audioLevels[index] * 1.2))
-                        .animation(.easeInOut(duration: 0.1), value: audioLevels[index])
-                }
+        ZStack {
+            // Always display the pulsating black bubble.
+            Circle()
+                .fill(Color.black)
+                .frame(width: 100, height: 100)
+                .scaleEffect(scaleFactor)
+                .animation(.easeInOut(duration: 0.1), value: scaleFactor)
+            
+            // If loading, overlay the white loading circle.
+            if isLoading {
+                WhiteLoadingView()
             }
-            .frame(height: geometry.size.height)
         }
     }
 }
 
-// MARK: - AudioManager
+// MARK: - WhiteLoadingView (Custom White Loader)
+struct WhiteLoadingView: View {
+    @State private var rotation: Double = 0
+    
+    var body: some View {
+        Circle()
+            .trim(from: 0, to: 0.75)
+            .stroke(Color.white, style: StrokeStyle(lineWidth: 10, lineCap: .round))
+            .frame(width: 100, height: 100)
+            .rotationEffect(Angle(degrees: rotation))
+            .onAppear {
+                withAnimation(Animation.linear(duration: 1.0).repeatForever(autoreverses: false)) {
+                    rotation = 360
+                }
+            }
+    }
+}
 
+// MARK: - AudioManager
 class AudioManager: NSObject, ObservableObject {
     @Published var levels: [CGFloat] = Array(repeating: 0.1, count: 20)
+    @Published var isLoading: Bool = false
     
     private var audioRecorder: AVAudioRecorder?
     var audioPlayer: AVAudioPlayer?
     private var timer: Timer?
-    private let fileName = "recording.m4a"  // Local recording file name
+    private let fileName = "recording.m4a"
     
-    // Start recording and update the audio levels for UI
+    // Start recording and update the audio levels for UI.
     func startRecording() {
         let audioSession = AVAudioSession.sharedInstance()
         try? audioSession.setCategory(.playAndRecord, mode: .default, options: .defaultToSpeaker)
@@ -135,7 +165,7 @@ class AudioManager: NSObject, ObservableObject {
         }
     }
     
-    // Stop recording and invalidate the timer
+    // Stop recording and invalidate the timer.
     func stopRecording() {
         audioRecorder?.stop()
         timer?.invalidate()
@@ -143,31 +173,32 @@ class AudioManager: NSObject, ObservableObject {
         print("Recording stopped. File saved at: \(getFileURL().path)")
     }
     
-    // Send the locally recorded file to the server, then decode, write, play, and delete the .wav file.
+    // Send the recorded file to the server, then decode, write, play, and delete the .wav file.
     func sendRecordingToServer() {
-        // Set up the backend URL.
         guard let url = URL(string: "http://3.137.210.3:8000/transcribe/") else {
-            // handle error
             print("Invalid URL")
             return
         }
         
-        // Configure the URLRequest.
+        DispatchQueue.main.async {
+            self.isLoading = true
+        }
+        
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         
-        // Set up a unique boundary for the multipart/form-data request.
         let boundary = "Boundary-\(UUID().uuidString)"
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         
-        // Get the local m4a file URL and load its data.
         let fileURL = getFileURL()
         guard let audioData = try? Data(contentsOf: fileURL) else {
             print("Failed to load recording data")
+            DispatchQueue.main.async {
+                self.isLoading = false
+            }
             return
         }
         
-        // Build the multipart/form-data payload.
         var body = Data()
         let filename = "recording.m4a"
         let mimetype = "audio/m4a"
@@ -181,40 +212,44 @@ class AudioManager: NSObject, ObservableObject {
         
         request.httpBody = body
         
-        // Create the URLSession data task.
         URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
             if let error = error {
+                DispatchQueue.main.async {
+                    self?.isLoading = false
+                }
                 print("Upload error: \(error.localizedDescription)")
                 return
             }
             
             guard let data = data else {
+                DispatchQueue.main.async {
+                    self?.isLoading = false
+                }
                 print("No data received from server")
                 return
             }
             
-            // Since the backend returns a WAV file directly, we write the binary data to a temporary file.
             DispatchQueue.main.async {
                 do {
-                    // Save the received WAV data to a temporary file.
                     let tempDirectory = FileManager.default.temporaryDirectory
                     let outputURL = tempDirectory.appendingPathComponent("output.wav")
                     try data.write(to: outputURL)
                     print("Server audio written to: \(outputURL.path)")
                     
-                    // Initialize and configure the AVAudioPlayer.
                     self?.audioPlayer = try AVAudioPlayer(contentsOf: outputURL)
                     self?.audioPlayer?.prepareToPlay()
                     self?.audioPlayer?.play()
+                    
+                    self?.isLoading = false
                     print("Playing audio from file")
                 } catch {
+                    self?.isLoading = false
                     print("Error handling audio data: \(error.localizedDescription)")
                 }
             }
         }.resume()
     }
-
-
+    
     // Helper to get the local file URL for the recorded audio.
     private func getFileURL() -> URL {
         let paths = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)
@@ -223,9 +258,7 @@ class AudioManager: NSObject, ObservableObject {
 }
 
 // MARK: - AVAudioPlayerDelegate Implementation
-
 extension AudioManager: AVAudioPlayerDelegate {
-    // Once playback finishes, delete the temporary .wav file.
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         let tempDirectory = FileManager.default.temporaryDirectory
         let outputURL = tempDirectory.appendingPathComponent("output.wav")
