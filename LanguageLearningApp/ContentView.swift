@@ -146,7 +146,8 @@ class AudioManager: NSObject, ObservableObject {
     // Send the locally recorded file to the server, then decode, write, play, and delete the .wav file.
     func sendRecordingToServer() {
         // Set up the backend URL.
-        guard let url = URL(string: "http://127.0.0.1:8000/transcribe/") else {
+        guard let url = URL(string: "http://3.137.210.3:8000/transcribe/") else {
+            // handle error
             print("Invalid URL")
             return
         }
